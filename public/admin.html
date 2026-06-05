@@ -727,8 +727,12 @@
       </div>
       <div class="form-row">
         <div class="form-group">
+          <label>Trading Price</label>
+          <input type="number" id="fPriceTrading" placeholder="0 (leave empty to hide)" min="0">
+        </div>
+        <div class="form-group">
           <label>Image</label>
-          <input type="text" id="fImg" placeholder="URL or upload..." oninput="previewImg()">
+          <input type="text" id="fImg" placeholder="URL or upload (optional)" oninput="previewImg()">
           <div class="img-upload-area">
             <div class="img-preview" id="imgPreview"><span style="color:var(--text-dim);font-size:0.7rem">No image</span></div>
             <label class="img-upload-btn">
@@ -1153,8 +1157,9 @@
       const prevFilter = sel.value;
       const cats = [...new Set(allProducts.map(p => p.cat).filter(Boolean))];
       const uncatCount = allProducts.filter(p => !p.cat).length;
-      sel.innerHTML = '<option value="">All Categories</option>' + cats.map(c => `<option value="${c}">${catLabels[c] || c}</option>`).join('') + `<option value="__uncategorized__">Uncategorized (${uncatCount})</option>`;
-      if (prevFilter && (cats.includes(prevFilter) || prevFilter === '__uncategorized__')) sel.value = prevFilter;
+      const noPhotoCount = allProducts.filter(p => !p.img).length;
+      sel.innerHTML = '<option value="">All Categories</option>' + cats.map(c => `<option value="${c}">${catLabels[c] || c}</option>`).join('') + `<option value="__uncategorized__">Uncategorized (${uncatCount})</option>` + `<option value="__no_photo__">&#128247; No Photo (${noPhotoCount})</option>`;
+      if (prevFilter && (cats.includes(prevFilter) || prevFilter === '__uncategorized__' || prevFilter === '__no_photo__')) sel.value = prevFilter;
       selectedProducts.clear();
       updateBulkBar();
       renderProducts();
@@ -1167,6 +1172,7 @@
     let list = allProducts;
     if (search) list = list.filter(p => p.name.toLowerCase().includes(search) || p.cat.includes(search));
     if (catFilter === '__uncategorized__') list = list.filter(p => !p.cat);
+    else if (catFilter === '__no_photo__') list = list.filter(p => !p.img);
     else if (catFilter) list = list.filter(p => p.cat === catFilter);
     const tbody = document.getElementById('productsBody');
     tbody.innerHTML = list.map(p => {
@@ -1176,7 +1182,7 @@
       return `
       <tr>
         <td class="cb-col"><input type="checkbox" value="${p.id}" ${checked} onchange="toggleProductSelect(this)"></td>
-        <td><div style="width:40px;height:40px;border-radius:6px;overflow:hidden;background:var(--bg)">${p.img ? `<img src="${p.img}" style="width:100%;height:100%;object-fit:cover">` : ''}</div></td>
+        <td><div style="width:40px;height:40px;border-radius:6px;overflow:hidden;background:var(--bg);display:flex;align-items:center;justify-content:center">${p.img ? `<img src="${p.img}" style="width:100%;height:100%;object-fit:cover">` : '<span style="font-size:1.1rem;opacity:0.3" title="No photo">&#128247;</span>'}</div></td>
         <td style="font-weight:500;max-width:300px">${escapeHTML(p.name)}</td>
         <td>${escapeHTML(catLabels[p.cat] || p.cat)}</td>
         <td style="font-weight:600">${formatPrice(p.price)}</td>
@@ -1283,6 +1289,7 @@
     document.getElementById('fPriceInstallment').value = product && product.priceTiers && product.priceTiers.installment ? product.priceTiers.installment : '';
     document.getElementById('fPriceCreditCard').value = product && product.priceTiers && product.priceTiers.creditCard ? product.priceTiers.creditCard : '';
     document.getElementById('fPriceHomeCredit').value = product && product.priceTiers && product.priceTiers.homeCredit ? product.priceTiers.homeCredit : '';
+    document.getElementById('fPriceTrading').value = product && product.priceTiers && product.priceTiers.trading ? product.priceTiers.trading : '';
     document.getElementById('fImg').value = product ? product.img : '';
     document.getElementById('fStock').value = product ? product.stock : 50;
     document.getElementById('fCondition').value = product ? product.condition : 'new';
@@ -1489,9 +1496,11 @@
     const piVal = parseFloat(document.getElementById('fPriceInstallment').value);
     const pcVal = parseFloat(document.getElementById('fPriceCreditCard').value);
     const phVal = parseFloat(document.getElementById('fPriceHomeCredit').value);
+    const ptVal = parseFloat(document.getElementById('fPriceTrading').value);
     if (piVal > 0) priceTiers.installment = piVal;
     if (pcVal > 0) priceTiers.creditCard = pcVal;
     if (phVal > 0) priceTiers.homeCredit = phVal;
+    if (ptVal > 0) priceTiers.trading = ptVal;
     const body = {
       cat: catVal,
       label: document.getElementById('fLabel').value,

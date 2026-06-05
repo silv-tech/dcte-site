@@ -1852,7 +1852,7 @@
         if(!res.ok)throw new Error('Server error '+res.status);
         const data=await res.json();
         try{if(settingsRes.ok)siteSettings=await settingsRes.json();}catch(e){}
-        products=data.map(p=>({cat:p.cat,label:p.label,name:p.name,price:p.price,img:p.img}));
+        products=data.map(p=>({cat:p.cat,label:p.label,name:p.name,price:p.price,priceTiers:p.priceTiers||null,img:p.img}));
         specDB={};productMeta={};
         data.forEach((p,i)=>{
           if(p.specs&&Object.keys(p.specs).length)specDB[p.name]=p.specs;
@@ -1895,7 +1895,7 @@
     function cardHTML(p,prefix){
       const idx=products.indexOf(p);
       const meta=productMeta[idx]||{stock:'in',condition:'new',badge:null};
-      const imgInner=p.img?`<img src="${p.img}" alt="" loading="lazy">`:'';
+      const imgInner=p.img?`<img src="${p.img}" alt="" loading="lazy">`:'<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:3rem;opacity:0.15">&#128187;</div>';
       const badgeHTML=meta.badge?`<div class="badge badge-${meta.badge}">${meta.badge}</div>`:'';
       const stockClass=meta.stock==='in'?'stock-in':meta.stock==='low'?'stock-low':'stock-preorder';
       const showCTA=siteSettings.showUrgencyCTA!==false;
@@ -2095,10 +2095,10 @@
               const tiers=p.priceTiers||{};
               const hasTiers=Object.values(tiers).some(v=>v&&Number(v)>0);
               if(!hasTiers)return '';
-              const icons={installment:'<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="1" y="4" width="22" height="16" rx="2"/><path d="M1 10h22"/></svg>',creditCard:'<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="1" y="4" width="22" height="16" rx="2"/><path d="M1 10h22"/><circle cx="7" cy="15" r="1.5"/></svg>',homeCredit:'<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12l9-8 9 8"/><path d="M5 10v10h14V10"/><rect x="9" y="14" width="6" height="6"/></svg>'};
-              const labels={installment:'Installment',creditCard:'Credit Card',homeCredit:'Home Credit'};
+              const icons={installment:'<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="1" y="4" width="22" height="16" rx="2"/><path d="M1 10h22"/></svg>',creditCard:'<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="1" y="4" width="22" height="16" rx="2"/><path d="M1 10h22"/><circle cx="7" cy="15" r="1.5"/></svg>',homeCredit:'<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12l9-8 9 8"/><path d="M5 10v10h14V10"/><rect x="9" y="14" width="6" height="6"/></svg>',trading:'<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4"/></svg>'};
+              const labels={installment:'Installment',creditCard:'Credit Card',homeCredit:'Home Credit',trading:'Trading Price'};
               let rows='<div class="pd-price-tier active"><span class="pd-price-tier-label"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg> Cash</span><span class="pd-price-tier-amount">'+formatPrice(p.price)+'</span></div>';
-              ['installment','creditCard','homeCredit'].forEach(k=>{if(tiers[k]&&Number(tiers[k])>0){rows+='<div class="pd-price-tier"><span class="pd-price-tier-label">'+icons[k]+' '+labels[k]+'</span><span class="pd-price-tier-amount">'+formatPrice(Number(tiers[k]))+'</span></div>'}});
+              ['installment','creditCard','homeCredit','trading'].forEach(k=>{if(tiers[k]&&Number(tiers[k])>0){rows+='<div class="pd-price-tier"><span class="pd-price-tier-label">'+icons[k]+' '+labels[k]+'</span><span class="pd-price-tier-amount">'+formatPrice(Number(tiers[k]))+'</span></div>'}});
               return '<div class="pd-price-tiers">'+rows+'</div>';
             })()}
             <div class="pd-actions">
