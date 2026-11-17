@@ -22,12 +22,71 @@ try {
   console.log('[INIT] Anthropic SDK not available:', e.message);
 }
 
+// Email notifications for new orders (optional — enabled when SMTP_* env vars are set)
+let mailTransport = null;
+try {
+  const nodemailer = require('nodemailer');
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    mailTransport = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: Number(process.env.SMTP_PORT) === 465,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+    console.log('[INIT] Order email notifications ENABLED ->', process.env.ORDER_NOTIFY_TO || process.env.SMTP_USER);
+  } else {
+    console.log('[INIT] Order email notifications disabled (set SMTP_HOST, SMTP_USER, SMTP_PASS to enable)');
+  }
+} catch (e) {
+  console.log('[INIT] nodemailer not available:', e.message);
+}
+
+function sendOrderEmail(order) {
+  if (!mailTransport) return;
+  const to = process.env.ORDER_NOTIFY_TO || process.env.SMTP_USER;
+  const from = process.env.ORDER_NOTIFY_FROM || process.env.SMTP_USER;
+  const c = order.customer || {};
+  const peso = n => '₱' + Number(n || 0).toLocaleString('en-PH');
+  const itemsText = (order.items || [])
+    .map(i => `  - ${i.qty} x ${i.name}  @ ${peso(i.price)} = ${peso(i.price * i.qty)}`)
+    .join('\n');
+  const body = [
+    `New order ${order.id}`,
+    ``,
+    `Customer:  ${c.firstName || ''} ${c.lastName || ''}`.trim(),
+    `Email:     ${c.email || '-'}`,
+    `Phone:     ${c.phone || '-'}`,
+    `Address:   ${c.street || ''}, ${c.city || ''}`,
+    ``,
+    `Items:`,
+    itemsText || '  (none)',
+    ``,
+    `Subtotal:  ${peso(order.subtotal)}`,
+    `Shipping (${order.shipping}): ${peso(order.shippingCost)}`,
+    `Total:     ${peso(order.total)}`,
+    `Payment:   ${order.payment}`,
+  ].join('\n');
+  mailTransport.sendMail({
+    from,
+    to,
+    replyTo: c.email || undefined,
+    subject: `New DCTE order ${order.id} — ${peso(order.total)}`,
+    text: body
+  })
+    .then(() => console.log(`[EMAIL] Order notification sent for ${order.id}`))
+    .catch(e => console.error(`[EMAIL] Failed to send order notification for ${order.id}: ${e.message}`));
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_PATH || path.join(__dirname, 'data');
 const SEED_DIR = path.join(__dirname, 'data');
 const UPLOADS_DIR = process.env.UPLOADS_PATH || path.join(__dirname, 'public', 'uploads');
 const JWT_SECRET = process.env.JWT_SECRET || 'dcte-fallback-secret-change-me';
+if (!process.env.JWT_SECRET) {
+  console.error('[SECURITY] JWT_SECRET is not set — using an insecure built-in fallback. ' +
+    'Admin tokens and loyalty QR codes can be forged. Set JWT_SECRET in the environment.');
+}
 
 // Ensure directories exist
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -63,7 +122,14 @@ const upload = multer({
   }
 });
 
-app.use(compression());
+// Compress normal responses, but never Server-Sent Event streams — compression
+// buffers them and the client receives nothing until the connection closes.
+app.use(compression({
+  filter: (req, res) => {
+    if (req.path === '/api/settings/stream') return false;
+    return compression.filter(req, res);
+  }
+}));
 // IMPORTANT: Do NOT change these Helmet settings without testing Google & Facebook login.
 // crossOriginOpenerPolicy MUST be false — setting it to 'same-origin' will break
 // Firebase signInWithPopup for both Google and Facebook by killing window.opener
@@ -85,23 +151,31 @@ if (process.env.UPLOADS_PATH) {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-// In-memory cache to avoid reading from disk on every request
+// In-memory cache to avoid reading from disk on every request. The cache is
+// keyed by file modification time so edits made directly to the JSON files
+// (scripts, manual edits, another process) are picked up without a restart.
 const jsonCache = {};
 
 function readJSON(filename) {
-  if (jsonCache[filename]) return JSON.parse(JSON.stringify(jsonCache[filename]));
   const file = path.join(DATA_DIR, filename);
+  let mtime = 0;
+  try { mtime = fs.statSync(file).mtimeMs; } catch { /* file may not exist yet */ }
+  const cached = jsonCache[filename];
+  if (cached && cached.mtime === mtime) return JSON.parse(JSON.stringify(cached.data));
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    jsonCache[filename] = data;
+    jsonCache[filename] = { mtime, data };
     return JSON.parse(JSON.stringify(data));
   } catch { return []; }
 }
 
 function writeJSON(filename, data) {
   const json = JSON.stringify(data, null, 2);
-  jsonCache[filename] = JSON.parse(json);
-  fs.writeFileSync(path.join(DATA_DIR, filename), json);
+  const file = path.join(DATA_DIR, filename);
+  fs.writeFileSync(file, json);
+  let mtime = 0;
+  try { mtime = fs.statSync(file).mtimeMs; } catch {}
+  jsonCache[filename] = { mtime, data: JSON.parse(json) };
 }
 
 function appendToFile(filename, entry) {
@@ -203,6 +277,56 @@ function ownerOnly(req, res, next) {
   next();
 }
 
+// ── Customer Auth (Firebase ID token verification) ────────────────
+// Customers authenticate with Firebase on the client. For any endpoint that
+// exposes a specific customer's data (points balance, in-store QR token) we
+// verify the Firebase ID token server-side against Google's public keys and
+// require that the token's uid matches the uid being requested.
+
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'dctestore';
+const GOOGLE_CERTS_URL = 'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
+let googleCerts = null;
+let googleCertsExpiry = 0;
+
+async function getGoogleCerts() {
+  if (googleCerts && Date.now() < googleCertsExpiry) return googleCerts;
+  const resp = await fetch(GOOGLE_CERTS_URL);
+  if (!resp.ok) throw new Error('Failed to fetch Google certs: ' + resp.status);
+  const certs = await resp.json();
+  const cc = resp.headers.get('cache-control') || '';
+  const m = cc.match(/max-age=(\d+)/);
+  googleCerts = certs;
+  googleCertsExpiry = Date.now() + (m ? parseInt(m[1], 10) * 1000 : 3600 * 1000);
+  return certs;
+}
+
+async function verifyFirebaseToken(idToken) {
+  const decoded = jwt.decode(idToken, { complete: true });
+  if (!decoded || !decoded.header || !decoded.header.kid) throw new Error('Malformed token');
+  const certs = await getGoogleCerts();
+  const cert = certs[decoded.header.kid];
+  if (!cert) throw new Error('Unknown signing key');
+  return jwt.verify(idToken, cert, {
+    algorithms: ['RS256'],
+    audience: FIREBASE_PROJECT_ID,
+    issuer: 'https://securetoken.google.com/' + FIREBASE_PROJECT_ID
+  });
+}
+
+async function customerAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Sign-in required' });
+  }
+  try {
+    const claims = await verifyFirebaseToken(authHeader.slice(7));
+    req.customerUid = claims.user_id || claims.sub;
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid or expired session' });
+  }
+}
+
 // ── Public API ───────────────────────────────────────────────────
 
 // GET /api/products — public storefront
@@ -289,11 +413,6 @@ app.post('/api/order', (req, res) => {
   if (!Array.isArray(items) || !items.length) {
     return res.status(400).json({ error: 'At least one item is required' });
   }
-  for (const item of items) {
-    if (!item.name || item.price == null || !item.qty) {
-      return res.status(400).json({ error: 'Each item must have name, price, and qty' });
-    }
-  }
 
   // Validate shipping & payment
   const validShipping = ['rider', 'outside', 'pickup'];
@@ -305,13 +424,41 @@ app.post('/api/order', (req, res) => {
     return res.status(400).json({ error: 'Invalid payment method' });
   }
 
-  // Validate total
-  if (!total || parseFloat(total) <= 0) {
-    return res.status(400).json({ error: 'Total must be greater than 0' });
+  // ── Server-side pricing (never trust client-supplied price/total) ──
+  // Look each item up in the live catalogue by id (preferred) or exact name,
+  // and recompute line prices, subtotal, shipping and total from trusted data.
+  const catalogue = readJSON('products.json');
+  const byId = new Map(catalogue.map(p => [String(p.id), p]));
+  const byName = new Map(catalogue.map(p => [String(p.name).trim().toLowerCase(), p]));
+
+  const pricedItems = [];
+  let subtotal = 0;
+  for (const item of items) {
+    if (!item || !item.name) {
+      return res.status(400).json({ error: 'Each item must have a name' });
+    }
+    const qty = Number(item.qty);
+    if (!Number.isInteger(qty) || qty < 1 || qty > 99) {
+      return res.status(400).json({ error: `Invalid quantity for "${item.name}"` });
+    }
+    const match = (item.id && byId.get(String(item.id))) || byName.get(String(item.name).trim().toLowerCase());
+    if (!match) {
+      return res.status(400).json({ error: `Product not found: "${item.name}". Please refresh and try again.` });
+    }
+    const unitPrice = Number(match.price);
+    if (!(unitPrice > 0)) {
+      return res.status(400).json({ error: `Product "${match.name}" is not available for order` });
+    }
+    subtotal += unitPrice * qty;
+    pricedItems.push({ id: match.id, name: match.name, price: unitPrice, qty });
   }
 
+  // Shipping cost is fixed by method, not supplied by the client
+  const shippingCost = shipping === 'rider' ? 79 : 0;
+  const computedTotal = subtotal + shippingCost;
+
   // Duplicate order prevention (same content within 60s)
-  const orderHash = crypto.createHash('md5').update(JSON.stringify({ customer: { firstName, lastName, email }, items, total })).digest('hex');
+  const orderHash = crypto.createHash('md5').update(JSON.stringify({ customer: { firstName, lastName, email }, items: pricedItems, total: computedTotal })).digest('hex');
   if (recentOrderHashes.has(orderHash)) {
     return res.status(409).json({ error: 'Duplicate order detected. Please wait before resubmitting.' });
   }
@@ -319,10 +466,11 @@ app.post('/api/order', (req, res) => {
 
   // Generate unique order ID
   const orderId = 'DCTE-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex');
-  const order = { id: orderId, customer, items, shipping, payment, total, customerUid: req.body.customerUid || null, status: 'Pending' };
+  const order = { id: orderId, customer, items: pricedItems, shipping, shippingCost, payment, subtotal, total: computedTotal, customerUid: req.body.customerUid || null, status: 'Pending' };
   appendToFile('orders.json', order);
-  console.log(`[ORDER] ${order.id} - ${firstName} ${lastName} - ${items.length} item(s) - Total: ${total}`);
-  res.json({ success: true, orderId: order.id });
+  console.log(`[ORDER] ${order.id} - ${firstName} ${lastName} - ${pricedItems.length} item(s) - Total: ${computedTotal}`);
+  sendOrderEmail(order);
+  res.json({ success: true, orderId: order.id, total: computedTotal });
 });
 
 // ── Admin Auth ───────────────────────────────────────────────────
@@ -412,7 +560,7 @@ app.get('/api/admin/stats', authMiddleware, ownerOnly, (req, res) => {
 
 // ── Admin: Delete Category ────────────────────────────────────────
 
-app.delete('/api/admin/categories/:cat', authMiddleware, (req, res) => {
+app.delete('/api/admin/categories/:cat', authMiddleware, ownerOnly, (req, res) => {
   const cat = req.params.cat;
   let products = readJSON('products.json');
   const matching = products.filter(p => p.cat === cat);
@@ -479,7 +627,7 @@ app.put('/api/admin/products/:id', authMiddleware, (req, res) => {
   res.json({ success: true, product: products[idx] });
 });
 
-app.delete('/api/admin/products/:id', authMiddleware, (req, res) => {
+app.delete('/api/admin/products/:id', authMiddleware, ownerOnly, (req, res) => {
   let products = readJSON('products.json');
   const idx = products.findIndex(p => p.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Product not found' });
@@ -594,7 +742,7 @@ Return ONLY valid JSON, no markdown, no code fences.`
 
 // ── Admin: Bulk Product Actions ──────────────────────────────────
 
-app.post('/api/admin/products/bulk', authMiddleware, (req, res) => {
+app.post('/api/admin/products/bulk', authMiddleware, ownerOnly, (req, res) => {
   const { action, ids, value } = req.body;
   if (!ids || !ids.length) return res.status(400).json({ error: 'No products selected' });
 
@@ -724,7 +872,7 @@ app.put('/api/admin/customers/:uid', authMiddleware, (req, res) => {
   res.json({ success: true });
 });
 
-app.delete('/api/admin/customers/:uid', authMiddleware, (req, res) => {
+app.delete('/api/admin/customers/:uid', authMiddleware, ownerOnly, (req, res) => {
   let customers = readJSON('customers.json');
   const before = customers.length;
   customers = customers.filter(c => c.uid !== req.params.uid);
@@ -735,7 +883,7 @@ app.delete('/api/admin/customers/:uid', authMiddleware, (req, res) => {
 
 // ── Admin: Export ────────────────────────────────────────────────
 
-app.get('/api/admin/export/products', authMiddleware, (req, res) => {
+app.get('/api/admin/export/products', authMiddleware, ownerOnly, (req, res) => {
   const file = path.join(DATA_DIR, 'products.json');
   res.download(file, 'products-backup.json');
 });
@@ -758,7 +906,7 @@ app.get('/api/admin/tradein', authMiddleware, (req, res) => {
 });
 
 // Admin: update trade-in data
-app.put('/api/admin/tradein', authMiddleware, (req, res) => {
+app.put('/api/admin/tradein', authMiddleware, ownerOnly, (req, res) => {
   const { conditions, types } = req.body;
   if (!conditions || typeof conditions !== 'object') {
     return res.status(400).json({ error: 'Conditions object is required' });
@@ -789,15 +937,21 @@ app.put('/api/admin/tradein', authMiddleware, (req, res) => {
 
 // ── Points System (Customer) ─────────────────────────────────────
 
-// Get QR token for a customer
-app.get('/api/points/qr-token/:uid', (req, res) => {
-  const token = generateQRToken(req.params.uid);
+// Get QR token for a customer (own account only)
+app.get('/api/points/qr-token/:uid', customerAuth, (req, res) => {
+  if (req.customerUid !== req.params.uid) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const token = generateQRToken(req.customerUid);
   res.json({ token });
 });
 
-// Get own points balance
-app.get('/api/points/:uid', (req, res) => {
-  const data = getCustomerPoints(req.params.uid);
+// Get own points balance (own account only)
+app.get('/api/points/:uid', customerAuth, (req, res) => {
+  if (req.customerUid !== req.params.uid) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const data = getCustomerPoints(req.customerUid);
   res.json({
     balance: data.balance,
     pesoValue: (data.balance / 100).toFixed(2),
@@ -928,7 +1082,7 @@ function broadcastSettings(settings) {
 }
 
 // PUT /api/admin/settings — admin only
-app.put('/api/admin/settings', authMiddleware, (req, res) => {
+app.put('/api/admin/settings', authMiddleware, ownerOnly, (req, res) => {
   const current = readSettings();
   const updated = { ...current, ...req.body };
   writeJSON('settings.json', updated);

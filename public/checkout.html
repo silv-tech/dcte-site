@@ -299,12 +299,23 @@
 
     // Support multi-item cart checkout
     let cartItems = [];
-    if (params.get('cart')) {
+    if (params.get('cartj')) {
+      // JSON-encoded cart (robust against names containing | or ;)
+      try {
+        cartItems = JSON.parse(params.get('cartj')).map(i => ({
+          name: String(i.name || 'Product'),
+          price: parseInt(i.price) || 0,
+          qty: parseInt(i.qty) || 1
+        }));
+      } catch (e) { cartItems = []; }
+    } else if (params.get('cart')) {
+      // Legacy pipe-delimited format (kept for older links)
       cartItems = params.get('cart').split(';;').map(s => {
         const [name, price, qty] = s.split('|');
         return { name, price: parseInt(price) || 0, qty: parseInt(qty) || 1 };
       });
-    } else {
+    }
+    if (!cartItems.length) {
       cartItems = [{ name: params.get('product') || 'Product', price: parseInt(params.get('price')) || 0, qty: 1 }];
     }
 
