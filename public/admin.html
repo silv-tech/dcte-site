@@ -960,9 +960,11 @@
     const roleBadge = `<span class="role-badge ${adminRole}">${roleLabel}</span>`;
     document.getElementById('adminUser').innerHTML = escapeHTML(adminUsername) + ' ' + roleBadge;
 
-    // Role-based tab visibility — only Dashboard is owner-only
+    // Role-based tab visibility — Dashboard and Settings are owner-only
     const isOwner = adminRole === 'owner';
     document.getElementById('tabBtn-dashboard').style.display = isOwner ? '' : 'none';
+    const settingsTab = document.getElementById('tabBtn-settings');
+    if (settingsTab) settingsTab.style.display = isOwner ? '' : 'none';
 
     if (!isOwner) {
       // Employees default to Products tab

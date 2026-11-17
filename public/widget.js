@@ -270,9 +270,12 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, session_id: sessionId })
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       hideTyping();
-      addMessage(data.reply, 'bot');
+      const reply = data && typeof data.reply === 'string' && data.reply.trim()
+        ? data.reply
+        : 'Sorry, our assistant is unavailable right now. Please message us on Facebook: facebook.com/DCTE168';
+      addMessage(reply, 'bot');
     } catch {
       hideTyping();
       addMessage('Sorry, something went wrong. Please try again.', 'bot');

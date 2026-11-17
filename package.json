@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Davao Computer Trade-in Express website with PayMongo checkout",
   "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
@@ -16,7 +19,8 @@
     "express": "^4.21.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^2.1.1"
+    "multer": "^2.1.1",
+    "nodemailer": "^10.6.0"
   },
   "devDependencies": {
     "sharp": "^0.34.5"
